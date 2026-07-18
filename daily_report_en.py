@@ -1,9 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 Daily Finance Brief (English edition) - GitHub Actions scheduled version
-Flow: fetch US indices + finance/tech news -> GitHub Models (free AI) picks
-highlights and writes an English digest -> send via Gmail.
-Secrets required: GMAIL_ADDRESS, GMAIL_APP_PASSWORD (GITHUB_TOKEN auto-provided)
+Secrets required: GMAIL_ADDRESS, GMAIL_APP_PASSWORD, (optional) SUBSCRIBERS_URL
 """
 
 import os
@@ -21,7 +19,6 @@ import yfinance as yf
 LA = ZoneInfo("America/Los_Angeles")
 UA = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"}
 
-# -- Market indices (^TNX = 10-yr Treasury yield, special display) ----------
 INDICES = [
     ("^GSPC", "S&P 500"),
     ("^IXIC", "Nasdaq"),
@@ -30,7 +27,6 @@ INDICES = [
     ("^TNX",  "US 10-Yr Treasury Yield"),
 ]
 
-# -- News sources (all English sites; edit freely: (display name, RSS url)) --
 FEEDS = [
     ("CNBC",          "https://www.cnbc.com/id/100003114/device/rss/rss.html"),
     ("Yahoo Finance", "https://finance.yahoo.com/news/rssindex"),
@@ -39,16 +35,18 @@ FEEDS = [
     ("TechCrunch",    "https://techcrunch.com/feed/"),
 ]
 
-PER_FEED = 10  # latest N headlines per source for the AI to filter
+PER_FEED = 10
 
 
 def should_run() -> bool:
-    """On scheduled runs, only proceed when it's 7 PM in Los Angeles.
-    The workflow has two crons (UTC 02:00 / 03:00) covering PDT/PST;
-    manual runs (workflow_dispatch) always proceed."""
+    """Trust the cron slot, not the clock: match which cron fired against
+    the current DST offset. Late runs still send; no duplicates; manual
+    runs always proceed."""
     if os.environ.get("GITHUB_EVENT_NAME") != "schedule":
         return True
-    return datetime.now(LA).hour == 19
+    offset = datetime.now(LA).utcoffset().total_seconds() / 3600  # PDT -7, PST -8
+    expected = "0 2 * * *" if offset == -7 else "0 3 * * *"
+    return os.environ.get("SCHEDULE_EXPR", "") == expected
 
 
 def fetch_market():
@@ -87,8 +85,22 @@ def fetch_news():
     return items
 
 
+def fetch_subscribers(lang="en"):
+    """Pull the subscriber list from the Apps Script endpoint; empty on failure."""
+    base = os.environ.get("SUBSCRIBERS_URL", "").strip()
+    if not base:
+        return []
+    try:
+        resp = requests.get(f"{base}&lang={lang}", timeout=30)
+        emails = [str(e).strip() for e in resp.json() if "@" in str(e)]
+        print(f"[subscribers] got {len(emails)} subscribers")
+        return emails
+    except Exception as e:
+        print(f"[subscribers] fetch failed (sending to self only): {e}")
+        return []
+
+
 def ai_digest(market, news):
-    """Call GitHub Models (free tier) for an English digest. Return None on failure."""
     token = os.environ.get("GITHUB_TOKEN")
     if not token or not news:
         return None
@@ -126,14 +138,12 @@ Only include stories that genuinely matter to investors; drop the rest. Use the 
     )
     resp.raise_for_status()
     content = resp.json()["choices"][0]["message"]["content"].strip()
-    # Safety: strip code fences if the model added them anyway
     if content.startswith("```"):
         content = content.strip("`").replace("html\n", "", 1).strip()
     return content
 
 
 def fallback_html(news):
-    """Backup when AI fails: list raw headlines."""
     lis = "".join(
         f'<li>({n["source"]}) <a href="{n["link"]}">{n["title"]}</a></li>'
         for n in news[:15]
@@ -142,15 +152,15 @@ def fallback_html(news):
 
 
 def build_email(market, digest_html):
-    today = datetime.now(LA).strftime("%Y%m%d")  # 8-digit date format
+    today = datetime.now(LA).strftime("%Y%m%d")
 
-    # US convention: green = up, red = down (swap the two codes to flip)
+    # US convention: green = up, red = down
     UP, DOWN = "#1e8449", "#c0392b"
 
     market_rows = ""
     for r in market:
         color = UP if r["chg_pct"] >= 0 else DOWN
-        if r["symbol"] == "^TNX":  # yield: show % level and bp change
+        if r["symbol"] == "^TNX":
             value = f"{r['last']:.2f}%"
             change = f"{r['chg_abs'] * 100:+.0f} bp"
         else:
@@ -178,7 +188,7 @@ def build_email(market, digest_html):
     {market_table}
     <div style="margin-top:8px;font-size:15px;">{digest_html}</div>
     <p style="margin-top:28px;font-size:12px;color:#999;border-top:1px solid #eee;padding-top:12px;">
-      Automated by GitHub Actions - delivered daily at 7:00 PM Los Angeles time
+      Automated by GitHub Actions - delivered daily at 7:00 PM Los Angeles time. To unsubscribe, just reply to this email.
     </p>
   </div>
 </div>
@@ -189,25 +199,27 @@ def build_email(market, digest_html):
 
 def send_email(subject, html):
     addr = os.environ["GMAIL_ADDRESS"]
-    # Strip regular and non-breaking spaces in case they sneak into the secret
     pwd = os.environ["GMAIL_APP_PASSWORD"].replace(" ", "").replace("\u00a0", "")
-    to = os.environ.get("MAIL_TO", addr)  # defaults to sending to yourself
+
+    # Self + subscribers, deduped; headers show self only, subscribers are BCC
+    recipients = list(dict.fromkeys([addr] + fetch_subscribers("en")))
 
     msg = MIMEMultipart("alternative")
     msg["Subject"] = subject
     msg["From"] = addr
-    msg["To"] = to
+    msg["To"] = addr
     msg.attach(MIMEText(html, "html", "utf-8"))
 
     ctx = ssl.create_default_context()
     with smtplib.SMTP_SSL("smtp.gmail.com", 465, context=ctx) as server:
         server.login(addr, pwd)
-        server.sendmail(addr, [to], msg.as_string())
+        server.sendmail(addr, recipients, msg.as_string())
+    print(f"[mail] sent to {len(recipients)} recipients (incl. self)")
 
 
 def main():
     if not should_run():
-        print("Not the 7 PM Los Angeles slot for this cron; skipping (DST dual-cron mechanism)")
+        print("Not this cron's slot for 7 PM LA time; skipping (DST dual-cron mechanism)")
         return
 
     market = fetch_market()
