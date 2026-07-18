@@ -1,0 +1,36 @@
+# 此檔案必須放在 repo 的 .github/workflows/daily.yml 路徑
+name: 每日財經日報
+
+on:
+  schedule:
+    # GitHub 排程只認 UTC，因此設兩組對應洛杉磯的冬夏令時間，
+    # 程式內會自動判斷「當地是否為早上 8 點」，只有一組會真正執行
+    - cron: "0 15 * * *"   # UTC 15:00 = 夏令 PDT 08:00
+    - cron: "0 16 * * *"   # UTC 16:00 = 冬令 PST 08:00
+  workflow_dispatch:        # 允許在 Actions 頁面手動觸發（測試用）
+
+permissions:
+  contents: read
+  models: read              # 讓 GITHUB_TOKEN 能免費呼叫 GitHub Models（AI 摘要）
+
+jobs:
+  send-report:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 取得程式碼
+        uses: actions/checkout@v4
+
+      - name: 安裝 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 安裝套件
+        run: pip install yfinance feedparser requests
+
+      - name: 產生並寄送日報
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GMAIL_ADDRESS: ${{ secrets.GMAIL_ADDRESS }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+        run: python daily_report.py
