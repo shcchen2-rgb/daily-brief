@@ -41,9 +41,9 @@ PER_FEED = 10  # 每個來源取最新幾則給 AI 篩選
 
 
 def should_run() -> bool:
-    """排程觸發時檢查洛杉磯當地是否為早上 8 點。
-    workflow 設了兩組 cron（UTC 15:00 / 16:00）對應夏令與冬令時間，
-    這裡只放行「當地 8 點」那一組；手動觸發（workflow_dispatch）一律放行。"""
+    """排程觸發時檢查洛杉磯當地是否為晚上 7 點。
+    workflow 設了兩組 cron（UTC 02:00 / 03:00）對應夏令與冬令時間，
+    這裡只放行「當地 19 點」那一組；手動觸發（workflow_dispatch）一律放行。"""
     if os.environ.get("GITHUB_EVENT_NAME") != "schedule":
         return True
     return datetime.now(LA).hour == 8
@@ -108,8 +108,8 @@ def ai_digest(market, news):
 
 請只輸出「純 HTML 片段」（不要 markdown、不要 ``` 圍欄），僅能使用 <h3> <p> <ul> <li> <a> <strong> 標籤，內容依序為：
 1. <h3>市場總評</h3>：2-3 句話點評美股整體情勢與值得留意的訊號
-2. <h3>財經重點</h3>：從標題中挑出 4-5 則最重要的財經／市場新聞，每則一個 <li>，格式：<strong>一句話繁中摘要</strong>—<a href="原始連結">原文</a>
-3. <h3>科技重點</h3>：挑 3-4 則最重要的科技／AI 新聞，格式同上
+2. <h3>財經重點</h3>：從標題中挑出 5 則最重要的財經／市場新聞，每則一個 <li>，格式：<strong>一句話繁中摘要</strong>—<a href="原始連結">原文</a>
+3. <h3>科技重點</h3>：挑 5 則最重要的科技／AI 新聞，格式同上
 只挑真正重要、對投資人有資訊價值的，其餘捨棄；連結務必使用我提供的原始連結，不要自行編造。"""
 
     resp = requests.post(
@@ -142,8 +142,8 @@ def fallback_html(news):
 def build_email(market, digest_html):
     today = datetime.now(LA).strftime("%Y%m%d")  # 8 位數日期格式
 
-    # 台式配色：紅漲綠跌（想改美式綠漲紅跌，把下面兩個色碼對調即可）
-    UP, DOWN = "#c0392b", "#1e8449"
+    # 台式配色：紅漲綠跌（想改美式綠漲紅跌，把下面兩個色碼對調即可）#已改
+    UP, DOWN = "#1e8449", "#c0392b"
 
     market_rows = ""
     for r in market:
@@ -176,7 +176,7 @@ def build_email(market, digest_html):
     {market_table}
     <div style="margin-top:8px;font-size:15px;">{digest_html}</div>
     <p style="margin-top:28px;font-size:12px;color:#999;border-top:1px solid #eee;padding-top:12px;">
-      由 GitHub Actions 自動產生・洛杉磯時間每日 08:00 發送
+      由 GitHub Actions 自動產生・洛杉磯時間每日 19:00 發送
     </p>
   </div>
 </div>
@@ -204,7 +204,7 @@ def send_email(subject, html):
 
 def main():
     if not should_run():
-        print("非洛杉磯當地早上 8 點的那組排程，跳過（冬夏令雙 cron 機制）")
+        print("非洛杉磯當地 19 點的那組排程，跳過（冬夏令雙 cron 機制）")
         return
 
     market = fetch_market()
