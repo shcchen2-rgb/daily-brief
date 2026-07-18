@@ -5,8 +5,8 @@ on:
   schedule:
     # GitHub 排程只認 UTC，因此設兩組對應洛杉磯的冬夏令時間，
     # 程式內會自動判斷「當地是否為早上 8 點」，只有一組會真正執行
-    - cron: "0 15 * * *"   # UTC 15:00 = 夏令 PDT 08:00
-    - cron: "0 16 * * *"   # UTC 16:00 = 冬令 PST 08:00
+    - cron: "0 2 * * *"   # UTC 02:00 = 夏令 PDT 19:00
+    - cron: "0 3 * * *"   # UTC 02:00 = 冬令 PST 19:00
   workflow_dispatch:        # 允許在 Actions 頁面手動觸發（測試用）
 
 permissions:
