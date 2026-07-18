@@ -2,7 +2,7 @@
 """
 每日財經日報 — GitHub Actions 自動排程版
 流程：抓美股指數 + 財經/科技新聞 → GitHub Models（免費 AI）挑重點寫繁中摘要 → Gmail 寄出
-所需 Secrets：GMAIL_ADDRESS、GMAIL_APP_PASSWORD（GITHUB_TOKEN 由 Actions 自動提供）
+所需 Secrets：GMAIL_ADDRESS、GMAIL_APP_PASSWORD、（選）SUBSCRIBERS_URL
 """
 
 import os
@@ -41,12 +41,13 @@ PER_FEED = 10  # 每個來源取最新幾則給 AI 篩選
 
 
 def should_run() -> bool:
-    """排程觸發時檢查洛杉磯當地是否為晚上 7 點。
-    workflow 設了兩組 cron（UTC 02:00 / 03:00）對應夏令與冬令時間，
-    這裡只放行「當地 19 點」那一組；手動觸發（workflow_dispatch）一律放行。"""
+    """認班次不看時鐘：判斷這次是哪組 cron 觸發＋現在是冬令還夏令。
+    GitHub 遲到再久都照寄，也不會重複寄；手動觸發一律放行。"""
     if os.environ.get("GITHUB_EVENT_NAME") != "schedule":
         return True
-    return datetime.now(LA).hour == 8
+    offset = datetime.now(LA).utcoffset().total_seconds() / 3600  # 夏令 -7、冬令 -8
+    expected = "0 2 * * *" if offset == -7 else "0 3 * * *"
+    return os.environ.get("SCHEDULE_EXPR", "") == expected
 
 
 def fetch_market():
@@ -83,6 +84,21 @@ def fetch_news():
             print(f"[news] {source} 抓取失敗：{e}")
     print(f"[news] 共收集 {len(items)} 則標題")
     return items
+
+
+def fetch_subscribers(lang="zh"):
+    """向 Apps Script 小窗口領取訂閱名單；沒設定或失敗就回空清單（照樣寄給自己）。"""
+    base = os.environ.get("SUBSCRIBERS_URL", "").strip()
+    if not base:
+        return []
+    try:
+        resp = requests.get(f"{base}&lang={lang}", timeout=30)
+        emails = [str(e).strip() for e in resp.json() if "@" in str(e)]
+        print(f"[subscribers] 領到 {len(emails)} 位訂閱者")
+        return emails
+    except Exception as e:
+        print(f"[subscribers] 名單抓取失敗（本次僅寄給自己）：{e}")
+        return []
 
 
 def ai_digest(market, news):
@@ -142,7 +158,7 @@ def fallback_html(news):
 def build_email(market, digest_html):
     today = datetime.now(LA).strftime("%Y%m%d")  # 8 位數日期格式
 
-    # 台式配色：紅漲綠跌（想改美式綠漲紅跌，把下面兩個色碼對調即可）#已改
+    # 美式配色：綠漲紅跌（想改台式紅漲綠跌，把下面兩個色碼對調即可）
     UP, DOWN = "#1e8449", "#c0392b"
 
     market_rows = ""
@@ -176,7 +192,7 @@ def build_email(market, digest_html):
     {market_table}
     <div style="margin-top:8px;font-size:15px;">{digest_html}</div>
     <p style="margin-top:28px;font-size:12px;color:#999;border-top:1px solid #eee;padding-top:12px;">
-      由 GitHub Actions 自動產生・洛杉磯時間每日 19:00 發送
+      由 GitHub Actions 自動產生・洛杉磯時間每日 19:00 發送・想退訂請直接回覆此信告知
     </p>
   </div>
 </div>
@@ -187,24 +203,28 @@ def build_email(market, digest_html):
 
 def send_email(subject, html):
     addr = os.environ["GMAIL_ADDRESS"]
-    pwd = os.environ["GMAIL_APP_PASSWORD"]
-    to = os.environ.get("MAIL_TO", addr)  # 未設定 MAIL_TO 就寄給自己
+    # 自動清掉不小心混進來的空格與不斷行空格
+    pwd = os.environ["GMAIL_APP_PASSWORD"].replace(" ", "").replace("\u00a0", "")
+
+    # 收件名單：自己 + 訂閱者，去重；抬頭只放自己，訂閱者全走密件副本（BCC）
+    recipients = list(dict.fromkeys([addr] + fetch_subscribers("zh")))
 
     msg = MIMEMultipart("alternative")
     msg["Subject"] = subject
     msg["From"] = addr
-    msg["To"] = to
+    msg["To"] = addr
     msg.attach(MIMEText(html, "html", "utf-8"))
 
     ctx = ssl.create_default_context()
     with smtplib.SMTP_SSL("smtp.gmail.com", 465, context=ctx) as server:
         server.login(addr, pwd)
-        server.sendmail(addr, [to], msg.as_string())
+        server.sendmail(addr, recipients, msg.as_string())
+    print(f"[mail] 已寄給 {len(recipients)} 位收件人（含自己）")
 
 
 def main():
     if not should_run():
-        print("非洛杉磯當地 19 點的那組排程，跳過（冬夏令雙 cron 機制）")
+        print("非洛杉磯當地晚上 7 點的那組排程，跳過（冬夏令雙 cron 機制）")
         return
 
     market = fetch_market()
