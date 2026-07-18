@@ -3,8 +3,8 @@ name: 每日財經日報
 
 on:
   schedule:
-    # GitHub 排程只認 UTC，因此設兩組對應洛杉磯的冬夏令時間，
-    # 程式內會自動判斷「當地是否為晚上 7 點」，只有一組會真正執行
+    # GitHub 排程只認 UTC，設兩組對應洛杉磯的冬夏令時間；
+    # 程式會比對「這次是哪組 cron 觸發」，遲到也照寄、不會重複寄
     - cron: "0 2 * * *"   # UTC 02:00 = 夏令 PDT 19:00
     - cron: "0 3 * * *"   # UTC 03:00 = 冬令 PST 19:00
   workflow_dispatch:       # 允許在 Actions 頁面手動觸發（測試用）
@@ -16,10 +16,12 @@ permissions:
 jobs:
   send-report:
     runs-on: ubuntu-latest
-    env:                   # 兩個版本共用同一組鑰匙，放在 job 層級不用重複寫
+    env:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       GMAIL_ADDRESS: ${{ secrets.GMAIL_ADDRESS }}
       GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+      SUBSCRIBERS_URL: ${{ secrets.SUBSCRIBERS_URL }}   # 訂閱名單小窗口（沒設就只寄自己）
+      SCHEDULE_EXPR: ${{ github.event.schedule }}        # 告訴程式這次是哪組 cron 叫醒的
     steps:
       - name: 取得程式碼
         uses: actions/checkout@v4
@@ -36,5 +38,5 @@ jobs:
         run: python daily_report.py
 
       - name: 產生並寄送英文版日報
-        if: always()       # 就算中文版失敗，英文版照寄（反之亦然，互不牽連）
+        if: always()       # 中文版失敗也照寄英文版，互不牽連
         run: python daily_report_en.py
