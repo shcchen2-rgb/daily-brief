@@ -5,13 +5,13 @@ on:
   schedule:
     # GitHub 排程只認 UTC，設兩組對應洛杉磯的冬夏令時間；
     # 程式會比對「這次是哪組 cron 觸發」，遲到也照寄、不會重複寄
-    - cron: "0 2 * * *"   # UTC 02:00 = 夏令 PDT 19:00
-    - cron: "0 3 * * *"   # UTC 03:00 = 冬令 PST 19:00
-  workflow_dispatch:       # 允許在 Actions 頁面手動觸發（測試用）
+    - cron: "0 22 * * *"   # UTC 22:00 = 夏令 PDT 15:00
+    - cron: "0 23 * * *"   # UTC 23:00 = 冬令 PST 15:00
+  workflow_dispatch:        # 允許在 Actions 頁面手動觸發（測試用）
 
 permissions:
   contents: read
-  models: read             # 讓 GITHUB_TOKEN 能免費呼叫 GitHub Models（AI 摘要）
+  models: read              # 讓 GITHUB_TOKEN 能免費呼叫 GitHub Models（AI 摘要）
 
 jobs:
   send-report:
