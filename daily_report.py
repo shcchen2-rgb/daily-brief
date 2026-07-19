@@ -56,11 +56,11 @@ def should_run() -> bool:
     if len(expr) < 2:
         return True  # 判斷不出來就照寄，寧可多寄也不要漏寄
     offset = datetime.now(LA).utcoffset().total_seconds() / 3600  # 夏令 -7、冬令 -8
-    return expr[1] == ("2" if offset == -7 else "3")
+    return expr[1] == ("22" if offset == -7 else "23")
 
 
 def report_date():
-    """這一班日報要報的日期（洛杉磯）。若因排程延遲跑到凌晨，仍算前一晚那一班。"""
+    """這一班日報要報的日期（洛杉磯）。若因排程延遲跑到凌晨，仍算前一天那一班。"""
     now = datetime.now(LA)
     return now.date() if now.hour >= 12 else (now - timedelta(days=1)).date()
 
@@ -223,7 +223,7 @@ def build_email(market, digest_html, session):
     {market_table}
     <div style="margin-top:8px;font-size:15px;">{digest_html}</div>
     <p style="margin-top:28px;font-size:12px;color:#999;border-top:1px solid #eee;padding-top:12px;">
-      由 GitHub Actions 自動產生・美股交易日晚間發送・想退訂請直接回覆此信告知
+      由 GitHub Actions 自動產生・美股交易日下午發送・想退訂請直接回覆此信告知
     </p>
   </div>
 </div>
@@ -255,7 +255,7 @@ def send_email(subject, html):
 
 def main():
     if not should_run():
-        print("非洛杉磯當地晚上 7 點的那組排程，跳過（冬夏令雙 cron 機制）")
+        print("非洛杉磯當地下午 3 點的那組排程，跳過（冬夏令雙 cron 機制）")
         return
 
     market, session = fetch_market()
