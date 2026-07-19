@@ -54,12 +54,12 @@ def should_run() -> bool:
     if len(expr) < 2:
         return True  # if undetermined, send anyway - better early than missing
     offset = datetime.now(LA).utcoffset().total_seconds() / 3600  # PDT -7, PST -8
-    return expr[1] == ("2" if offset == -7 else "3")
+    return expr[1] == ("22" if offset == -7 else "23")
 
 
 def report_date():
     """The date this edition covers (LA). If a delayed run slips past midnight,
-    it still counts as the previous evening's slot."""
+    it still counts as the previous day's slot."""
     now = datetime.now(LA)
     return now.date() if now.hour >= 12 else (now - timedelta(days=1)).date()
 
@@ -250,7 +250,7 @@ def send_email(subject, html):
 
 def main():
     if not should_run():
-        print("Not this cron's slot for 7 PM LA time; skipping (DST dual-cron mechanism)")
+        print("Not this cron's slot for 3 PM LA time; skipping (DST dual-cron mechanism)")
         return
 
     market, session = fetch_market()
