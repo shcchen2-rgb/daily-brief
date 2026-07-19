@@ -7,8 +7,9 @@
 
 import os
 import ssl
+import time
 import smtplib
-from datetime import datetime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
@@ -40,22 +41,39 @@ FEEDS = [
 PER_FEED = 10  # 每個來源取最新幾則給 AI 篩選
 
 
+def is_manual() -> bool:
+    """是否為手動觸發（Run workflow）。手動一律放行，方便隨時測試。"""
+    return os.environ.get("GITHUB_EVENT_NAME") != "schedule"
+
+
 def should_run() -> bool:
-    """認班次不看時鐘：判斷這次是哪組 cron 觸發＋現在是冬令還夏令。
+    """認班次不看時鐘：比對「這次是哪組 cron 叫醒的」與現在的冬夏令。
+    只讀 cron 的「小時」欄位，所以之後微調分鐘（避開整點壅塞）不會改壞。
     GitHub 遲到再久都照寄，也不會重複寄；手動觸發一律放行。"""
-    if os.environ.get("GITHUB_EVENT_NAME") != "schedule":
+    if is_manual():
         return True
+    expr = os.environ.get("SCHEDULE_EXPR", "").split()
+    if len(expr) < 2:
+        return True  # 判斷不出來就照寄，寧可多寄也不要漏寄
     offset = datetime.now(LA).utcoffset().total_seconds() / 3600  # 夏令 -7、冬令 -8
-    expected = "0 2 * * *" if offset == -7 else "0 3 * * *"
-    return os.environ.get("SCHEDULE_EXPR", "") == expected
+    return expr[1] == ("2" if offset == -7 else "3")
+
+
+def report_date():
+    """這一班日報要報的日期（洛杉磯）。若因排程延遲跑到凌晨，仍算前一晚那一班。"""
+    now = datetime.now(LA)
+    return now.date() if now.hour >= 12 else (now - timedelta(days=1)).date()
 
 
 def fetch_market():
-    rows = []
+    """回傳 (指數列表, 最近交易日日期)；交易日由 S&P 500 的最後一筆收盤決定。"""
+    rows, session = [], None
     for symbol, name in INDICES:
         try:
-            hist = yf.Ticker(symbol).history(period="5d")["Close"].dropna()
+            hist = yf.Ticker(symbol).history(period="7d")["Close"].dropna()
             if len(hist) >= 2:
+                if symbol == "^GSPC":
+                    session = hist.index[-1].date()
                 last, prev = float(hist.iloc[-1]), float(hist.iloc[-2])
                 rows.append({
                     "name": name,
@@ -66,7 +84,7 @@ def fetch_market():
                 })
         except Exception as e:
             print(f"[market] {symbol} 抓取失敗：{e}")
-    return rows
+    return rows, session
 
 
 def fetch_news():
@@ -87,18 +105,31 @@ def fetch_news():
 
 
 def fetch_subscribers(lang="zh"):
-    """向 Apps Script 小窗口領取訂閱名單；沒設定或失敗就回空清單（照樣寄給自己）。"""
+    """向 Apps Script 小窗口領取訂閱名單。
+    Apps Script 偶爾會冷啟動吐出非 JSON 的頁面，因此重試 3 次，
+    並把回應開頭印進 log 方便診斷；真的領不到就只寄給自己。"""
     base = os.environ.get("SUBSCRIBERS_URL", "").strip()
     if not base:
+        print("[subscribers] 未設定 SUBSCRIBERS_URL，本次僅寄給自己")
         return []
-    try:
-        resp = requests.get(f"{base}&lang={lang}", timeout=30)
-        emails = [str(e).strip() for e in resp.json() if "@" in str(e)]
-        print(f"[subscribers] 領到 {len(emails)} 位訂閱者")
-        return emails
-    except Exception as e:
-        print(f"[subscribers] 名單抓取失敗（本次僅寄給自己）：{e}")
-        return []
+
+    url = f"{base}&lang={lang}"
+    for attempt in range(1, 4):
+        resp = None
+        try:
+            resp = requests.get(url, headers=UA, timeout=30)
+            emails = [str(e).strip() for e in resp.json() if "@" in str(e)]
+            print(f"[subscribers] 領到 {len(emails)} 位訂閱者")
+            return emails
+        except Exception as e:
+            snippet = ""
+            if resp is not None:
+                snippet = resp.text[:120].replace("\n", " ")
+            print(f"[subscribers] 第 {attempt} 次領取失敗：{e}｜回應開頭：{snippet}")
+            if attempt < 3:
+                time.sleep(5)
+    print("[subscribers] 三次都失敗，本次僅寄給自己")
+    return []
 
 
 def ai_digest(market, news):
@@ -155,8 +186,8 @@ def fallback_html(news):
     return f"<h3>今日新聞</h3><p>（AI 摘要暫時失效，以下為原始標題）</p><ul>{lis}</ul>"
 
 
-def build_email(market, digest_html):
-    today = datetime.now(LA).strftime("%Y%m%d")  # 8 位數日期格式
+def build_email(market, digest_html, session):
+    today = (session or report_date()).strftime("%Y%m%d")  # 以交易日為準的 8 位數日期
 
     # 美式配色：綠漲紅跌（想改台式紅漲綠跌，把下面兩個色碼對調即可）
     UP, DOWN = "#1e8449", "#c0392b"
@@ -188,11 +219,11 @@ def build_email(market, digest_html):
   <div style="background:#fff;border-radius:12px;padding:28px 24px;box-shadow:0 1px 3px rgba(0,0,0,.06);">
     <p style="margin:0;font-size:12px;letter-spacing:2px;color:#a08a4f;">DAILY BRIEF</p>
     <h2 style="margin:4px 0 20px;font-size:22px;">每日財經日報 <span style="color:#a08a4f;">{today}</span></h2>
-    <h3 style="font-size:16px;border-left:3px solid #a08a4f;padding-left:10px;">市場快照</h3>
+    <h3 style="font-size:16px;border-left:3px solid #a08a4f;padding-left:10px;">市場快照（{today} 收盤）</h3>
     {market_table}
     <div style="margin-top:8px;font-size:15px;">{digest_html}</div>
     <p style="margin-top:28px;font-size:12px;color:#999;border-top:1px solid #eee;padding-top:12px;">
-      由 GitHub Actions 自動產生・洛杉磯時間每日 19:00 發送・想退訂請直接回覆此信告知
+      由 GitHub Actions 自動產生・美股交易日晚間發送・想退訂請直接回覆此信告知
     </p>
   </div>
 </div>
@@ -227,7 +258,19 @@ def main():
         print("非洛杉磯當地晚上 7 點的那組排程，跳過（冬夏令雙 cron 機制）")
         return
 
-    market = fetch_market()
+    market, session = fetch_market()
+    today = report_date()
+
+    # 只在美股有開盤的日子寄：週末與國定假日自動略過（用最近交易日判斷，不必維護假日表）
+    if session and session != today:
+        if is_manual():
+            print(f"[market] {today} 美股休市（最近交易日 {session}），但手動觸發照寄")
+        else:
+            print(f"[market] {today} 美股休市（最近交易日 {session}），今天不寄日報")
+            return
+    if not session:
+        print("[market] 無法判斷交易日（資料源可能限流），保險起見照常寄出")
+
     news = fetch_news()
 
     digest = None
@@ -239,7 +282,7 @@ def main():
     if not digest:
         digest = fallback_html(news)
 
-    subject, html = build_email(market, digest)
+    subject, html = build_email(market, digest, session)
     send_email(subject, html)
     print("✅ 日報已寄出")
 
