@@ -6,8 +6,9 @@ Secrets required: GMAIL_ADDRESS, GMAIL_APP_PASSWORD, (optional) SUBSCRIBERS_URL
 
 import os
 import ssl
+import time
 import smtplib
-from datetime import datetime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
@@ -38,23 +39,40 @@ FEEDS = [
 PER_FEED = 10
 
 
+def is_manual() -> bool:
+    """Manual runs (Run workflow) always proceed, so testing is never blocked."""
+    return os.environ.get("GITHUB_EVENT_NAME") != "schedule"
+
+
 def should_run() -> bool:
-    """Trust the cron slot, not the clock: match which cron fired against
-    the current DST offset. Late runs still send; no duplicates; manual
-    runs always proceed."""
-    if os.environ.get("GITHUB_EVENT_NAME") != "schedule":
+    """Trust the cron slot, not the clock: match which cron fired against the
+    current DST offset. Only the hour field is read, so tweaking the minute
+    (to dodge top-of-hour congestion) won't break it."""
+    if is_manual():
         return True
+    expr = os.environ.get("SCHEDULE_EXPR", "").split()
+    if len(expr) < 2:
+        return True  # if undetermined, send anyway - better early than missing
     offset = datetime.now(LA).utcoffset().total_seconds() / 3600  # PDT -7, PST -8
-    expected = "0 2 * * *" if offset == -7 else "0 3 * * *"
-    return os.environ.get("SCHEDULE_EXPR", "") == expected
+    return expr[1] == ("2" if offset == -7 else "3")
+
+
+def report_date():
+    """The date this edition covers (LA). If a delayed run slips past midnight,
+    it still counts as the previous evening's slot."""
+    now = datetime.now(LA)
+    return now.date() if now.hour >= 12 else (now - timedelta(days=1)).date()
 
 
 def fetch_market():
-    rows = []
+    """Return (index rows, last session date); session date comes from S&P 500."""
+    rows, session = [], None
     for symbol, name in INDICES:
         try:
-            hist = yf.Ticker(symbol).history(period="5d")["Close"].dropna()
+            hist = yf.Ticker(symbol).history(period="7d")["Close"].dropna()
             if len(hist) >= 2:
+                if symbol == "^GSPC":
+                    session = hist.index[-1].date()
                 last, prev = float(hist.iloc[-1]), float(hist.iloc[-2])
                 rows.append({
                     "name": name,
@@ -65,7 +83,7 @@ def fetch_market():
                 })
         except Exception as e:
             print(f"[market] {symbol} failed: {e}")
-    return rows
+    return rows, session
 
 
 def fetch_news():
@@ -86,18 +104,31 @@ def fetch_news():
 
 
 def fetch_subscribers(lang="en"):
-    """Pull the subscriber list from the Apps Script endpoint; empty on failure."""
+    """Pull the subscriber list from the Apps Script endpoint.
+    Apps Script occasionally cold-starts and returns a non-JSON page, so retry
+    up to 3 times and log the start of the response body for diagnosis."""
     base = os.environ.get("SUBSCRIBERS_URL", "").strip()
     if not base:
+        print("[subscribers] SUBSCRIBERS_URL not set; sending to self only")
         return []
-    try:
-        resp = requests.get(f"{base}&lang={lang}", timeout=30)
-        emails = [str(e).strip() for e in resp.json() if "@" in str(e)]
-        print(f"[subscribers] got {len(emails)} subscribers")
-        return emails
-    except Exception as e:
-        print(f"[subscribers] fetch failed (sending to self only): {e}")
-        return []
+
+    url = f"{base}&lang={lang}"
+    for attempt in range(1, 4):
+        resp = None
+        try:
+            resp = requests.get(url, headers=UA, timeout=30)
+            emails = [str(e).strip() for e in resp.json() if "@" in str(e)]
+            print(f"[subscribers] got {len(emails)} subscribers")
+            return emails
+        except Exception as e:
+            snippet = ""
+            if resp is not None:
+                snippet = resp.text[:120].replace("\n", " ")
+            print(f"[subscribers] attempt {attempt} failed: {e} | body starts: {snippet}")
+            if attempt < 3:
+                time.sleep(5)
+    print("[subscribers] all 3 attempts failed; sending to self only")
+    return []
 
 
 def ai_digest(market, news):
@@ -151,8 +182,8 @@ def fallback_html(news):
     return f"<h3>Today's Headlines</h3><p>(AI digest temporarily unavailable; raw headlines below)</p><ul>{lis}</ul>"
 
 
-def build_email(market, digest_html):
-    today = datetime.now(LA).strftime("%Y%m%d")
+def build_email(market, digest_html, session):
+    today = (session or report_date()).strftime("%Y%m%d")
 
     # US convention: green = up, red = down
     UP, DOWN = "#1e8449", "#c0392b"
@@ -184,11 +215,11 @@ def build_email(market, digest_html):
   <div style="background:#fff;border-radius:12px;padding:28px 24px;box-shadow:0 1px 3px rgba(0,0,0,.06);">
     <p style="margin:0;font-size:12px;letter-spacing:2px;color:#a08a4f;">DAILY BRIEF - ENGLISH EDITION</p>
     <h2 style="margin:4px 0 20px;font-size:22px;">Daily Finance Brief <span style="color:#a08a4f;">{today}</span></h2>
-    <h3 style="font-size:16px;border-left:3px solid #a08a4f;padding-left:10px;">Market Snapshot</h3>
+    <h3 style="font-size:16px;border-left:3px solid #a08a4f;padding-left:10px;">Market Snapshot ({today} close)</h3>
     {market_table}
     <div style="margin-top:8px;font-size:15px;">{digest_html}</div>
     <p style="margin-top:28px;font-size:12px;color:#999;border-top:1px solid #eee;padding-top:12px;">
-      Automated by GitHub Actions - delivered daily at 7:00 PM Los Angeles time. To unsubscribe, just reply to this email.
+      Automated by GitHub Actions - sent on US trading days. To unsubscribe, just reply to this email.
     </p>
   </div>
 </div>
@@ -222,7 +253,20 @@ def main():
         print("Not this cron's slot for 7 PM LA time; skipping (DST dual-cron mechanism)")
         return
 
-    market = fetch_market()
+    market, session = fetch_market()
+    today = report_date()
+
+    # Only send on days the US market actually traded: weekends and holidays are
+    # skipped automatically via the last session date - no holiday table needed.
+    if session and session != today:
+        if is_manual():
+            print(f"[market] Market closed on {today} (last session {session}); manual run, sending anyway")
+        else:
+            print(f"[market] Market closed on {today} (last session {session}); no brief today")
+            return
+    if not session:
+        print("[market] Could not determine session date (source may be rate-limiting); sending anyway")
+
     news = fetch_news()
 
     digest = None
@@ -234,7 +278,7 @@ def main():
     if not digest:
         digest = fallback_html(news)
 
-    subject, html = build_email(market, digest)
+    subject, html = build_email(market, digest, session)
     send_email(subject, html)
     print("Email sent successfully")
 
