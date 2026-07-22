@@ -1,17 +1,22 @@
 # 此檔案位於 .github/workflows/daily.yml
+# 排程已改由外部觸發器（cron-job.org）準點呼叫，不再使用 GitHub 內建的 schedule
 name: 每日財經日報
 
 on:
-  schedule:
-    # GitHub 排程只認 UTC，設兩組對應洛杉磯的冬夏令時間；
-    # 程式會比對「這次是哪組 cron 觸發」，遲到也照寄、不會重複寄
-    - cron: "0 2 * * *"   # UTC 02:00 = 夏令 PDT 19:00
-    - cron: "0 3 * * *"   # UTC 03:00 = 冬令 PST 19:00
-  workflow_dispatch:       # 允許在 Actions 頁面手動觸發（測試用）
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "執行模式（正式=含訂閱者且休市不寄／測試=只寄自己且休市照跑）"
+        type: choice
+        required: false
+        default: auto
+        options:
+          - auto
+          - test
 
 permissions:
   contents: read
-  models: read             # 讓 GITHUB_TOKEN 能免費呼叫 GitHub Models（AI 摘要）
+  models: read              # 讓 GITHUB_TOKEN 能免費呼叫 GitHub Models（AI 摘要）
 
 jobs:
   send-report:
@@ -20,8 +25,9 @@ jobs:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       GMAIL_ADDRESS: ${{ secrets.GMAIL_ADDRESS }}
       GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
-      SUBSCRIBERS_URL: ${{ secrets.SUBSCRIBERS_URL }}   # 訂閱名單小窗口（沒設就只寄自己）
-      SCHEDULE_EXPR: ${{ github.event.schedule }}        # 告訴程式這次是哪組 cron 叫醒的
+      SUBSCRIBERS_URL: ${{ secrets.SUBSCRIBERS_URL }}    # 訂閱名單小窗口
+      TEST_RECIPIENTS: ${{ secrets.TEST_RECIPIENTS }}    # 測試用的自己人信箱，逗號分隔
+      RUN_MODE: ${{ inputs.mode || 'auto' }}             # 外部觸發沒帶參數時預設正式模式
     steps:
       - name: 取得程式碼
         uses: actions/checkout@v4
