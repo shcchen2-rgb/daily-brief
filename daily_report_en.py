@@ -39,22 +39,17 @@ FEEDS = [
 PER_FEED = 10
 
 
-def is_manual() -> bool:
-    """Manual runs (Run workflow) always proceed, so testing is never blocked."""
-    return os.environ.get("GITHUB_EVENT_NAME") != "schedule"
+def is_test_mode() -> bool:
+    """Test mode: chosen manually from the Actions page. Runs even when the
+    market is closed and only mails your own test accounts, never subscribers."""
+    return os.environ.get("RUN_MODE", "auto").strip().lower() == "test"
 
 
-def should_run() -> bool:
-    """Trust the cron slot, not the clock: match which cron fired against the
-    current DST offset. Only the hour field is read, so tweaking the minute
-    (to dodge top-of-hour congestion) won't break it."""
-    if is_manual():
-        return True
-    expr = os.environ.get("SCHEDULE_EXPR", "").split()
-    if len(expr) < 2:
-        return True  # if undetermined, send anyway - better early than missing
-    offset = datetime.now(LA).utcoffset().total_seconds() / 3600  # PDT -7, PST -8
-    return expr[1] == ("22" if offset == -7 else "23")
+def test_recipients():
+    """Test recipients from the TEST_RECIPIENTS secret (comma-separated)."""
+    raw = os.environ.get("TEST_RECIPIENTS", "").replace("\n", ",")
+    emails = [e.strip() for e in raw.split(",") if "@" in e]
+    return emails or [os.environ["GMAIL_ADDRESS"]]
 
 
 def report_date():
@@ -219,21 +214,26 @@ def build_email(market, digest_html, session):
     {market_table}
     <div style="margin-top:8px;font-size:15px;">{digest_html}</div>
     <p style="margin-top:28px;font-size:12px;color:#999;border-top:1px solid #eee;padding-top:12px;">
-      Automated by GitHub Actions - sent on US trading days. To unsubscribe, just reply to this email.
+      Automated by GitHub Actions - sent at 3 PM on US trading days. To unsubscribe, just reply to this email.
     </p>
   </div>
 </div>
 </body></html>"""
 
-    return f"Daily Finance Brief {today}", html
+    prefix = "[TEST] " if is_test_mode() else ""
+    return f"{prefix}Daily Finance Brief {today}", html
 
 
 def send_email(subject, html):
     addr = os.environ["GMAIL_ADDRESS"]
     pwd = os.environ["GMAIL_APP_PASSWORD"].replace(" ", "").replace("\u00a0", "")
 
-    # Self + subscribers, deduped; headers show self only, subscribers are BCC
-    recipients = list(dict.fromkeys([addr] + fetch_subscribers("en")))
+    # Test mode mails only your own accounts; live mode includes subscribers
+    if is_test_mode():
+        recipients = list(dict.fromkeys([addr] + test_recipients()))
+        print(f"[mail] test mode: sending to {len(recipients)} of your own accounts")
+    else:
+        recipients = list(dict.fromkeys([addr] + fetch_subscribers("en")))
 
     msg = MIMEMultipart("alternative")
     msg["Subject"] = subject
@@ -249,18 +249,15 @@ def send_email(subject, html):
 
 
 def main():
-    if not should_run():
-        print("Not this cron's slot for 3 PM LA time; skipping (DST dual-cron mechanism)")
-        return
-
+    print(f"[mode] run mode: {'TEST (self only)' if is_test_mode() else 'LIVE (incl. subscribers)'}")
     market, session = fetch_market()
     today = report_date()
 
     # Only send on days the US market actually traded: weekends and holidays are
     # skipped automatically via the last session date - no holiday table needed.
     if session and session != today:
-        if is_manual():
-            print(f"[market] Market closed on {today} (last session {session}); manual run, sending anyway")
+        if is_test_mode():
+            print(f"[market] Market closed on {today} (last session {session}); test mode, running anyway")
         else:
             print(f"[market] Market closed on {today} (last session {session}); no brief today")
             return
