@@ -41,22 +41,17 @@ FEEDS = [
 PER_FEED = 10  # 每個來源取最新幾則給 AI 篩選
 
 
-def is_manual() -> bool:
-    """是否為手動觸發（Run workflow）。手動一律放行，方便隨時測試。"""
-    return os.environ.get("GITHUB_EVENT_NAME") != "schedule"
+def is_test_mode() -> bool:
+    """測試模式：由 Actions 頁面手動選 test 時啟用。
+    休市也照跑，且只寄給自己的測試帳號，不會打擾訂閱者。"""
+    return os.environ.get("RUN_MODE", "auto").strip().lower() == "test"
 
 
-def should_run() -> bool:
-    """認班次不看時鐘：比對「這次是哪組 cron 叫醒的」與現在的冬夏令。
-    只讀 cron 的「小時」欄位，所以之後微調分鐘（避開整點壅塞）不會改壞。
-    GitHub 遲到再久都照寄，也不會重複寄；手動觸發一律放行。"""
-    if is_manual():
-        return True
-    expr = os.environ.get("SCHEDULE_EXPR", "").split()
-    if len(expr) < 2:
-        return True  # 判斷不出來就照寄，寧可多寄也不要漏寄
-    offset = datetime.now(LA).utcoffset().total_seconds() / 3600  # 夏令 -7、冬令 -8
-    return expr[1] == ("22" if offset == -7 else "23")
+def test_recipients():
+    """測試收件人（存在 TEST_RECIPIENTS Secret，逗號分隔；沒設就只寄給自己）。"""
+    raw = os.environ.get("TEST_RECIPIENTS", "").replace("\n", ",")
+    emails = [e.strip() for e in raw.split(",") if "@" in e]
+    return emails or [os.environ["GMAIL_ADDRESS"]]
 
 
 def report_date():
@@ -223,13 +218,14 @@ def build_email(market, digest_html, session):
     {market_table}
     <div style="margin-top:8px;font-size:15px;">{digest_html}</div>
     <p style="margin-top:28px;font-size:12px;color:#999;border-top:1px solid #eee;padding-top:12px;">
-      由 GitHub Actions 自動產生・美股交易日下午發送・想退訂請直接回覆此信告知
+      由 GitHub Actions 自動產生・美股交易日下午 3 點發送・想退訂請直接回覆此信告知
     </p>
   </div>
 </div>
 </body></html>"""
 
-    return f"每日財經日報 {today}", html
+    prefix = "[測試] " if is_test_mode() else ""
+    return f"{prefix}每日財經日報 {today}", html
 
 
 def send_email(subject, html):
@@ -237,8 +233,12 @@ def send_email(subject, html):
     # 自動清掉不小心混進來的空格與不斷行空格
     pwd = os.environ["GMAIL_APP_PASSWORD"].replace(" ", "").replace("\u00a0", "")
 
-    # 收件名單：自己 + 訂閱者，去重；抬頭只放自己，訂閱者全走密件副本（BCC）
-    recipients = list(dict.fromkeys([addr] + fetch_subscribers("zh")))
+    # 收件名單：測試模式只寄自己的帳號，正式模式才含訂閱者
+    if is_test_mode():
+        recipients = list(dict.fromkeys([addr] + test_recipients()))
+        print(f"[mail] 測試模式：只寄給 {len(recipients)} 個自己的帳號")
+    else:
+        recipients = list(dict.fromkeys([addr] + fetch_subscribers("zh")))
 
     msg = MIMEMultipart("alternative")
     msg["Subject"] = subject
@@ -254,17 +254,14 @@ def send_email(subject, html):
 
 
 def main():
-    if not should_run():
-        print("非洛杉磯當地下午 3 點的那組排程，跳過（冬夏令雙 cron 機制）")
-        return
-
+    print(f"[mode] 本次執行模式：{'測試（只寄自己）' if is_test_mode() else '正式（含訂閱者）'}")
     market, session = fetch_market()
     today = report_date()
 
     # 只在美股有開盤的日子寄：週末與國定假日自動略過（用最近交易日判斷，不必維護假日表）
     if session and session != today:
-        if is_manual():
-            print(f"[market] {today} 美股休市（最近交易日 {session}），但手動觸發照寄")
+        if is_test_mode():
+            print(f"[market] {today} 美股休市（最近交易日 {session}），測試模式照跑")
         else:
             print(f"[market] {today} 美股休市（最近交易日 {session}），今天不寄日報")
             return
